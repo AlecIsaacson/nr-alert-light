@@ -3,12 +3,12 @@
 package main
 
 import (
-	//"encoding/json"
+	"encoding/json"
 	"os"
 	"log"
 	"flag"
 	"net/http"
-	"fmt"
+	//"fmt"
 )
 
 //New Relic webhooks look like this.
@@ -56,7 +56,12 @@ type nrWebhookStruct struct {
 	ViolationChartURL    interface{} `json:"violation_chart_url"`
 }
 
+// Map to store open alerts. Outer map holds severity (i.e. critical, warning), inner holds
+// incident ID and status (i.e. open)
+var alerts = make(map[string]map[int]string)
+
 func main() {
+	//Initialze logging
 	logFile, err := os.OpenFile("nr-alert-light.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
 	if err != nil {
 	    log.Fatalf("error opening file: %v", err)
@@ -64,34 +69,58 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
-	log.Println("New Relic Alert Light v1.0")
 	log.Println("")
+	log.Println("New Relic Alert Light v1.0")
 	logVerbose := flag.Bool("verbose", false, "Writes verbose logs for debugging")
-	// For some reason, the below results in a can't convert string to byte error, while the StringVar type doesn't.
-	//alertJSON := flag.String("alert", "", "Alert JSON")
-	var alertJSON string
-	flag.StringVar(&alertJSON, "alert", "", "Alert JSON")
 	flag.Parse()
 
 	if *logVerbose {
 		log.Println("Verbose logging enabled.")
-		log.Println("Received JSON: ",alertJSON)
 	}
 
+	//Initialize the inner maps.
+	alerts["CRITICAL"] = make(map[int]string)
+	alerts["WARNING"] = make(map[int]string)
+
+	//Launch HTTP listener
 	http.HandleFunc("/", hookHandler)
 	log.Fatal(http.ListenAndServe(":9000", nil))
 }
 
+//Handle incoming hooks.
 func hookHandler (resp http.ResponseWriter, req *http.Request) {
-	fmt.Println(req)
-	// var nrAlertInfo nrWebhookStruct
-	// if err := json.Unmarshal([]byte(alertJSON), &nrAlertInfo); err != nil {
-	// 	panic(err)
-	// }
-	//
-	// if *logVerbose {
-	// 	log.Println("Unmarshalling alert into struct")
-	// 	log.Println(nrAlertInfo)
-	// }
-	//log.Println("New Incident:",nrAlertInfo.CurrentState, nrAlertInfo.IncidentID, nrAlertInfo.Severity)
+	var nrAlertInfo nrWebhookStruct
+	if err := json.NewDecoder(req.Body,).Decode(&nrAlertInfo); err != nil {
+		http.Error(resp, err.Error(), http.StatusBadRequest)
+		log.Println("Malformed request received:", err.Error())
+		return
+	}
+	log.Println("New Incident:",nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
+	lightDriver(nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
+}
+
+//Take valid hooks and set the lights.
+func lightDriver (nrSeverity string, nrIncidentID int, nrCurrentState string) {
+	log.Println ("Processing Incident: ", nrSeverity, nrIncidentID, nrCurrentState)
+	switch nrCurrentState {
+	case "open":
+		log.Println("Received alert open message")
+		if _, alertExists := alerts[nrSeverity][nrIncidentID]; alertExists {
+			log.Println("Alert exists, nothing to do.")
+		} else {
+			log.Println("Alert does not exist, adding to map.")
+			alerts[nrSeverity][nrIncidentID] = nrCurrentState
+		}
+	case "closed":
+		log.Println("Received alert close message")
+		if _, alertExists := alerts[nrSeverity][nrIncidentID]; alertExists {
+			log.Println("Alert exists, removing.")
+			delete(alerts[nrSeverity], nrIncidentID)
+		} else {
+			log.Println("Alert does not exist, this shouldn't happen.")
+		}
+	default:
+		log.Println("Received alert with unexpected current state")
+	}
+	log.Println("Open Critical:", len(alerts["CRITICAL"]), "Open Warning:", len(alerts["WARNING"]))
 }
