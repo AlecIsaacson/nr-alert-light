@@ -8,7 +8,11 @@ import (
 	"log"
 	"flag"
 	"net/http"
-	//"fmt"
+	"fmt"
+	"os/signal"
+	"syscall"
+
+	"github.com/stianeikeland/go-rpio"
 )
 
 //New Relic webhooks look like this.
@@ -60,6 +64,10 @@ type nrWebhookStruct struct {
 // incident ID and status (i.e. open)
 var alerts = make(map[string]map[int]string)
 
+// Which light is on what pin on the Pi
+var critPin int = 18
+var warnPin int = 14
+
 func main() {
 	//Initialze logging
 	logFile, err := os.OpenFile("nr-alert-light.log", os.O_RDWR | os.O_CREATE | os.O_APPEND, 0666)
@@ -70,13 +78,17 @@ func main() {
 	log.SetOutput(logFile)
 
 	log.Println("")
-	log.Println("New Relic Alert Light v1.0")
-	logVerbose := flag.Bool("verbose", false, "Writes verbose logs for debugging")
+	log.Println("New Relic Alert Light v1.1")
+	logVerbose := flag.Bool("verbose", false, "Writes verbose logs for debugging.")
+	serverPort := flag.String("listen", "9000", "Port to listen on.")
 	flag.Parse()
 
 	if *logVerbose {
 		log.Println("Verbose logging enabled.")
 	}
+
+	//Setup our shutdown handler
+	shutdownHandler()
 
 	//Initialize the inner maps.
 	alerts["CRITICAL"] = make(map[int]string)
@@ -84,7 +96,8 @@ func main() {
 
 	//Launch HTTP listener
 	http.HandleFunc("/", hookHandler)
-	log.Fatal(http.ListenAndServe(":9000", nil))
+	http.HandleFunc("/info", infoHandler)
+	log.Fatal(http.ListenAndServe(":"+*serverPort, nil))
 }
 
 //Handle incoming hooks.
@@ -96,11 +109,18 @@ func hookHandler (resp http.ResponseWriter, req *http.Request) {
 		return
 	}
 	log.Println("New Incident:",nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
-	lightDriver(nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
+	alertCount := alertTracker(nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
+	lightDriver(alertCount)
 }
 
-//Take valid hooks and set the lights.
-func lightDriver (nrSeverity string, nrIncidentID int, nrCurrentState string) {
+//
+//If someone calls the /info URL, send back some info.
+func infoHandler (resp http.ResponseWriter, req *http.Request) {
+	fmt.Fprintf(resp, "Info Page")
+}
+
+//Take valid hooks, extract the info we need and return the number of open crit and warn alerts.
+func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (map[string]int) {
 	log.Println ("Processing Incident: ", nrSeverity, nrIncidentID, nrCurrentState)
 	switch nrCurrentState {
 	case "open":
@@ -123,4 +143,67 @@ func lightDriver (nrSeverity string, nrIncidentID int, nrCurrentState string) {
 		log.Println("Received alert with unexpected current state")
 	}
 	log.Println("Open Critical:", len(alerts["CRITICAL"]), "Open Warning:", len(alerts["WARNING"]))
+	alertCount := map[string]int{"CRITICAL": len(alerts["CRITICAL"]), "WARNING": len(alerts["WARNING"])}
+	return alertCount
+}
+
+func lightDriver (alertCount map[string]int) {
+	if err := rpio.Open(); err != nil {
+		log.Println("Failed to open RPI for IO", err)
+	}
+
+	for alertSeverity, count := range alertCount {
+		switch alertSeverity {
+		case "CRITICAL":
+			log.Println("Evaluating critical alert count")
+			if count > 0 {
+				log.Println("Critical alert count > 0, light on.")
+				pin := rpio.Pin(critPin)
+				pin.Output()
+				pin.High()
+			} else if count == 0 {
+				log.Println("Critical alert count = 0, light off.")
+				pin := rpio.Pin(critPin)
+				pin.Output()
+				pin.Low()
+			} else {
+				log.Println("Unexpected value for critical alert count:", count)
+			}
+		case "WARNING":
+			log.Println("Evaluating warning alert count")
+			if count > 0 {
+				log.Println("Warning alert count > 0, light on.")
+				pin := rpio.Pin(warnPin)
+				pin.Output()
+				pin.High()
+			} else if count == 0 {
+				log.Println("Warning alert count = 0, light off.")
+				pin := rpio.Pin(warnPin)
+				pin.Output()
+				pin.Low()
+			} else {
+				log.Println("Unexpected value for warning alert count:", count)
+			}
+		default:
+			log.Println("Unexpected alert severity received:", alertSeverity)
+		}
+	}
+}
+
+func shutdownHandler() {
+	shutdownChannel := make(chan os.Signal)
+	signal.Notify(shutdownChannel, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-shutdownChannel
+		log.Println("Shutdown signal received, turning off lights")
+		pin := rpio.Pin(warnPin)
+		pin.Output()
+		pin.Low()
+
+		pin = rpio.Pin(critPin)
+		pin.Output()
+		pin.Low()
+
+		os.Exit(0)
+	}()
 }
