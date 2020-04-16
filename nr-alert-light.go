@@ -1,4 +1,5 @@
 // Listens for New Relic webhooks and turns on a status light when one is received.
+// Written by AI of New Relic 4/16/2020
 //
 package main
 
@@ -77,6 +78,7 @@ func main() {
 	defer logFile.Close()
 	log.SetOutput(logFile)
 
+	//Setup startup flags.
 	log.Println("")
 	log.Println("New Relic Alert Light v1.1")
 	logVerbose := flag.Bool("verbose", false, "Writes verbose logs for debugging.")
@@ -90,17 +92,17 @@ func main() {
 	//Setup our shutdown handler
 	shutdownHandler()
 
-	//Initialize the inner maps.
+	//Initialize the inner maps for the open alert tracker.
 	alerts["CRITICAL"] = make(map[int]string)
 	alerts["WARNING"] = make(map[int]string)
 
-	//Launch HTTP listener
+	//Launch HTTP listener.  Blocks until program end.
 	http.HandleFunc("/", hookHandler)
 	http.HandleFunc("/info", infoHandler)
 	log.Fatal(http.ListenAndServe(":"+*serverPort, nil))
 }
 
-//Handle incoming hooks.
+//Handle incoming webhooks from NR.
 func hookHandler (resp http.ResponseWriter, req *http.Request) {
 	var nrAlertInfo nrWebhookStruct
 	if err := json.NewDecoder(req.Body,).Decode(&nrAlertInfo); err != nil {
@@ -119,7 +121,8 @@ func infoHandler (resp http.ResponseWriter, req *http.Request) {
 	fmt.Fprintf(resp, "Info Page")
 }
 
-//Take valid hooks, extract the info we need and return the number of open crit and warn alerts.
+//Take valid hooks, extract the info we need, then account for and return the number of open crit and warn alerts.
+//We keep an in-memory struct of open critical and warn alerts by alert ID.  When an alert is closed, we remove it from the struct.
 func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (map[string]int) {
 	log.Println ("Processing Incident: ", nrSeverity, nrIncidentID, nrCurrentState)
 	switch nrCurrentState {
@@ -137,7 +140,7 @@ func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (
 			log.Println("Alert exists, removing.")
 			delete(alerts[nrSeverity], nrIncidentID)
 		} else {
-			log.Println("Alert does not exist, this shouldn't happen.")
+			log.Println("Trying to close an non-existent alert, this shouldn't happen often.")
 		}
 	default:
 		log.Println("Received alert with unexpected current state")
@@ -147,11 +150,13 @@ func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (
 	return alertCount
 }
 
+//This handles the work of driving the RaspberryPi GPIO pins.
 func lightDriver (alertCount map[string]int) {
 	if err := rpio.Open(); err != nil {
 		log.Println("Failed to open RPI for IO", err)
 	}
 
+	//Yes, this code is repetitive and I probably could do something more elegant.
 	for alertSeverity, count := range alertCount {
 		switch alertSeverity {
 		case "CRITICAL":
@@ -190,6 +195,7 @@ func lightDriver (alertCount map[string]int) {
 	}
 }
 
+//If any lights are on when the app ends, they'll stay on. This fixes that.
 func shutdownHandler() {
 	shutdownChannel := make(chan os.Signal)
 	signal.Notify(shutdownChannel, os.Interrupt, syscall.SIGTERM)
