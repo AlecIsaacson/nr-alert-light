@@ -16,6 +16,8 @@ import (
 	"github.com/stianeikeland/go-rpio"
 )
 
+var appVersion = "2.0"
+
 //New Relic webhooks look like this.
 type nrWebhookStruct struct {
 	AccountID                     int         `json:"account_id"`
@@ -80,7 +82,7 @@ func main() {
 
 	//Setup startup flags.
 	log.Println("")
-	log.Println("New Relic Alert Light v1.1")
+	log.Println("New Relic Alert Light v",appVersion)
 	logVerbose := flag.Bool("verbose", false, "Writes verbose logs for debugging.")
 	serverPort := flag.String("listen", "9000", "Port to listen on.")
 	flag.Parse()
@@ -97,13 +99,14 @@ func main() {
 	alerts["WARNING"] = make(map[int]string)
 
 	//Launch HTTP listener.  Blocks until program end.
-	http.HandleFunc("/", hookHandler)
-	http.HandleFunc("/info", infoHandler)
+	http.HandleFunc("/info/", infoHandler)
+	http.HandleFunc("/hook", hookHandler)
 	log.Fatal(http.ListenAndServe(":"+*serverPort, nil))
 }
 
 //Handle incoming webhooks from NR.
 func hookHandler (resp http.ResponseWriter, req *http.Request) {
+	log.Println("Attempting to process webhook")
 	var nrAlertInfo nrWebhookStruct
 	if err := json.NewDecoder(req.Body,).Decode(&nrAlertInfo); err != nil {
 		http.Error(resp, err.Error(), http.StatusBadRequest)
@@ -112,13 +115,10 @@ func hookHandler (resp http.ResponseWriter, req *http.Request) {
 	}
 	log.Println("New Incident:",nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
 	alertCount := alertTracker(nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
-	lightDriver(alertCount)
-}
-
-//
-//If someone calls the /info URL, send back some info.
-func infoHandler (resp http.ResponseWriter, req *http.Request) {
-	fmt.Fprintf(resp, "Info Page")
+	if err := lightDriver(alertCount); err != nil {
+		http.Error(resp, err.Error(), http.StatusInternalServerError)
+		log.Println("GPIO error, unable to set lights.")
+	}
 }
 
 //Take valid hooks, extract the info we need, then account for and return the number of open crit and warn alerts.
@@ -151,9 +151,10 @@ func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (
 }
 
 //This handles the work of driving the RaspberryPi GPIO pins.
-func lightDriver (alertCount map[string]int) {
+func lightDriver (alertCount map[string]int) (err error){
 	if err := rpio.Open(); err != nil {
 		log.Println("Failed to open RPI for IO", err)
+		return err
 	}
 
 	//Yes, this code is repetitive and I probably could do something more elegant.
@@ -193,6 +194,15 @@ func lightDriver (alertCount map[string]int) {
 			log.Println("Unexpected alert severity received:", alertSeverity)
 		}
 	}
+	return err
+}
+
+//
+//If someone calls the /info URL, send back some info.
+func infoHandler (resp http.ResponseWriter, req *http.Request) {
+	log.Println("Info request received")
+	title := "Info Page"
+	fmt.Fprintf(resp, "<h1>%s</h1><div>Version: %v</div><div>Critical Alerts %v</div><div>Warning Alerts %v</div>", title, appVersion, alerts["CRITICAL"], alerts["WARNING"])
 }
 
 //If any lights are on when the app ends, they'll stay on. This fixes that.
@@ -202,6 +212,10 @@ func shutdownHandler() {
 	go func() {
 		<-shutdownChannel
 		log.Println("Shutdown signal received, turning off lights")
+		if err := rpio.Open(); err != nil {
+			log.Println("Failed to open RPI for IO", err)
+			os.Exit(1)
+		}
 		pin := rpio.Pin(warnPin)
 		pin.Output()
 		pin.Low()
