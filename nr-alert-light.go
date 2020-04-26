@@ -13,7 +13,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/stianeikeland/go-rpio"
+	"lights"
 )
 
 var appVersion = "2.0"
@@ -115,7 +115,7 @@ func hookHandler (resp http.ResponseWriter, req *http.Request) {
 	}
 	log.Println("New Incident:",nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
 	alertCount := alertTracker(nrAlertInfo.Severity, nrAlertInfo.IncidentID, nrAlertInfo.CurrentState)
-	if err := lightDriver(alertCount); err != nil {
+	if err := lights.LightDriver(alertCount); err != nil {
 		http.Error(resp, err.Error(), http.StatusInternalServerError)
 		log.Println("GPIO error, unable to set lights.")
 	}
@@ -148,53 +148,6 @@ func alertTracker (nrSeverity string, nrIncidentID int, nrCurrentState string) (
 	log.Println("Open Critical:", len(alerts["CRITICAL"]), "Open Warning:", len(alerts["WARNING"]))
 	alertCount := map[string]int{"CRITICAL": len(alerts["CRITICAL"]), "WARNING": len(alerts["WARNING"])}
 	return alertCount
-}
-
-//This handles the work of driving the RaspberryPi GPIO pins.
-func lightDriver (alertCount map[string]int) (err error){
-	if err := rpio.Open(); err != nil {
-		log.Println("Failed to open RPI for IO", err)
-		return err
-	}
-
-	//Yes, this code is repetitive and I probably could do something more elegant.
-	for alertSeverity, count := range alertCount {
-		switch alertSeverity {
-		case "CRITICAL":
-			log.Println("Evaluating critical alert count")
-			if count > 0 {
-				log.Println("Critical alert count > 0, light on.")
-				pin := rpio.Pin(critPin)
-				pin.Output()
-				pin.High()
-			} else if count == 0 {
-				log.Println("Critical alert count = 0, light off.")
-				pin := rpio.Pin(critPin)
-				pin.Output()
-				pin.Low()
-			} else {
-				log.Println("Unexpected value for critical alert count:", count)
-			}
-		case "WARNING":
-			log.Println("Evaluating warning alert count")
-			if count > 0 {
-				log.Println("Warning alert count > 0, light on.")
-				pin := rpio.Pin(warnPin)
-				pin.Output()
-				pin.High()
-			} else if count == 0 {
-				log.Println("Warning alert count = 0, light off.")
-				pin := rpio.Pin(warnPin)
-				pin.Output()
-				pin.Low()
-			} else {
-				log.Println("Unexpected value for warning alert count:", count)
-			}
-		default:
-			log.Println("Unexpected alert severity received:", alertSeverity)
-		}
-	}
-	return err
 }
 
 //
